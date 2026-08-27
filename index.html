@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoicePod テスト</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; padding: 40px 20px; }
+    button { font-size: 20px; padding: 16px 32px; margin: 12px; border-radius: 10px; cursor: pointer; }
+    #status { margin-top: 24px; font-size: 16px; color: #444; }
+  </style>
+</head>
+<body>
+  <h2>VoicePod 音声テスト</h2>
+  <button id="recordBtn">録音開始</button>
+  <button id="playBtn" disabled>再生</button>
+  <p id="status">「録音開始」を押して話してください</p>
+
+  <script>
+    let mediaRecorder;
+    let audioChunks = [];
+    let audioBlob;
+    let audioUrl;
+
+    const recordBtn = document.getElementById('recordBtn');
+    const playBtn = document.getElementById('playBtn');
+    const status = document.getElementById('status');
+
+    // 古いiOS対応のAPI取得
+    function getUserMediaStream(constraints) {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        return navigator.mediaDevices.getUserMedia(constraints);
+      }
+      const legacyGetUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+      if (!legacyGetUserMedia) {
+        return Promise.reject(new Error('マイク機能がサポートされていないか、HTTPSで開かれていません。'));
+      }
+      return new Promise((resolve, reject) => {
+        legacyGetUserMedia.call(navigator, constraints, resolve, reject);
+      });
+    }
+
+    recordBtn.addEventListener('click', async () => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        recordBtn.textContent = '録音開始';
+        status.textContent = '録音完了。「再生」を押してください。';
+        return;
+      }
+
+      try {
+        const stream = await getUserMediaStream({ audio: true });
+        
+        if (typeof MediaRecorder === 'undefined') {
+          throw new Error('MediaRecorderが未対応です（Web Audio処理が必要）');
+        }
+
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+        mediaRecorder.onstop = () => {
+          audioBlob = new Blob(audioChunks, { type: 'audio/mp4' });
+          audioUrl = URL.createObjectURL(audioBlob);
+          playBtn.disabled = false;
+        };
+
+        mediaRecorder.start();
+        recordBtn.textContent = '録音停止';
+        status.textContent = '録音中... 声を出してください';
+      } catch (err) {
+        status.textContent = 'エラー: ' + err.message;
+      }
+    });
+
+    playBtn.addEventListener('click', () => {
+      if (audioUrl) {
+        const audio = new Audio(audioUrl);
+        audio.play();
+        status.textContent = '音声を再生中...';
+        audio.onended = () => { status.textContent = '再生が終了しました。'; };
+      }
+    });
+  </script>
+</body>
+</html>
