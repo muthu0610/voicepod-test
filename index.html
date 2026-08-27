@@ -3,22 +3,25 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VoicePod テスト</title>
+  <title>VoicePod iOS12 テスト</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; padding: 40px 20px; }
+    body { font-family: -apple-system, sans-serif; text-align: center; padding: 40px 20px; }
     button { font-size: 20px; padding: 16px 32px; margin: 12px; border-radius: 10px; cursor: pointer; }
     #status { margin-top: 24px; font-size: 16px; color: #444; }
   </style>
 </head>
 <body>
-  <h2>VoicePod 音声テスト</h2>
+  <h2>VoicePod 音声テスト (iOS 12)</h2>
   <button id="recordBtn">録音開始</button>
   <button id="playBtn" disabled>再生</button>
-  <p id="status">「録音開始」を押して話してください</p>
+  <p id="status">「録音開始」を押してください</p>
 
   <script>
-    let mediaRecorder;
-    let audioChunks = [];
+    let audioContext;
+    let mediaStream;
+    let recLength = 0;
+    let recBuffers = [];
+    let isRecording = false;
     let audioBlob;
     let audioUrl;
 
@@ -26,50 +29,61 @@
     const playBtn = document.getElementById('playBtn');
     const status = document.getElementById('status');
 
-    // 古いiOS対応のAPI取得
-    function getUserMediaStream(constraints) {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        return navigator.mediaDevices.getUserMedia(constraints);
-      }
-      const legacyGetUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
-      if (!legacyGetUserMedia) {
-        return Promise.reject(new Error('マイク機能がサポートされていないか、HTTPSで開かれていません。'));
-      }
-      return new Promise((resolve, reject) => {
-        legacyGetUserMedia.call(navigator, constraints, resolve, reject);
-      });
-    }
-
     recordBtn.addEventListener('click', async () => {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
+      if (isRecording) {
+        // 録音停止
+        isRecording = false;
         recordBtn.textContent = '録音開始';
+        status.textContent = '録音データを処理中...';
+
+        if (mediaStream) {
+          mediaStream.getTracks().forEach(track => track.stop());
+        }
+
+        const buffer = mergeBuffers(recBuffers, recLength);
+        audioBlob = exportWAV(buffer, audioContext.sampleRate);
+        audioUrl = URL.createObjectURL(audioBlob);
+        playBtn.disabled = false;
         status.textContent = '録音完了。「再生」を押してください。';
         return;
       }
 
+      // 録音開始
       try {
-        const stream = await getUserMediaStream({ audio: true });
-        
-        if (typeof MediaRecorder === 'undefined') {
-          throw new Error('MediaRecorderが未対応です（Web Audio処理が必要）');
-        }
+        window.AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioContext = new AudioContext();
 
-        mediaRecorder = new MediaRecorder(stream);
-        audioChunks = [];
+        // 旧Safari対応のgetUserMedia呼び出し
+        const getUserMedia = (navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+          ? constraints => navigator.mediaDevices.getUserMedia(constraints)
+          : constraints => {
+              const legacy = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.getUserMedia;
+              if (!legacy) return Promise.reject(new Error('マイクAPI未対応です'));
+              return new Promise((res, rej) => legacy.call(navigator, constraints, res, rej));
+            };
 
-        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-        mediaRecorder.onstop = () => {
-          audioBlob = new Blob(audioChunks, { type: 'audio/mp4' });
-          audioUrl = URL.createObjectURL(audioBlob);
-          playBtn.disabled = false;
+        mediaStream = await getUserMedia({ audio: true });
+        const source = audioContext.createMediaStreamSource(mediaStream);
+        const node = (audioContext.createScriptProcessor || audioContext.createJavaScriptNode).call(audioContext, 4096, 1, 1);
+
+        recBuffers = [];
+        recLength = 0;
+
+        node.onaudioprocess = e => {
+          if (!isRecording) return;
+          const input = e.inputBuffer.getChannelData(0);
+          recBuffers.push(new Float32Array(input));
+          recLength += input.length;
         };
 
-        mediaRecorder.start();
+        source.connect(node);
+        node.connect(audioContext.destination);
+
+        isRecording = true;
         recordBtn.textContent = '録音停止';
         status.textContent = '録音中... 声を出してください';
       } catch (err) {
-        status.textContent = 'エラー: ' + err.message;
+        status.textContent = 'エラー: ' + err.name + ' - ' + err.message;
       }
     });
 
@@ -81,6 +95,43 @@
         audio.onended = () => { status.textContent = '再生が終了しました。'; };
       }
     });
+
+    function mergeBuffers(channelBuffer, recordingLength) {
+      const result = new Float32Array(recordingLength);
+      let offset = 0;
+      for (let i = 0; i < channelBuffer.length; i++) {
+        result.set(channelBuffer[i], offset);
+        offset += channelBuffer[i].length;
+      }
+      return result;
+    }
+
+    function exportWAV(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      function writeString(view, offset, string) {
+        for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
+      }
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeString(view, 8, 'WAVE');
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(view, 36, 'data');
+      view.setUint32(40, samples.length * 2, true);
+      let offset = 44;
+      for (let i = 0; i < samples.length; i++, offset += 2) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      }
+      return new Blob([view], { type: 'audio/wav' });
+    }
   </script>
 </body>
 </html>
